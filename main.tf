@@ -36,13 +36,17 @@ locals {
   security_groups_ids = compact(concat(var.additional_security_group_ids, local.sg_wireguard_external))
 }
 
-resource "aws_launch_configuration" "wireguard_launch_config" {
-  name_prefix                 = "wireguard-${var.env}-"
-  image_id                    = var.ami_id == null ? data.aws_ami.ubuntu.id : var.ami_id
-  instance_type               = var.instance_type
-  key_name                    = var.ssh_key_id
-  iam_instance_profile        = (var.use_eip ? aws_iam_instance_profile.wireguard_profile[0].name : null)
-  user_data                   = templatefile("${path.module}/templates/user-data.txt", {
+resource "aws_launch_template" "wireguard_launch_template" {
+  name_prefix   = "wireguard-${var.env}-"
+  image_id      = var.ami_id == null ? data.aws_ami.ubuntu.id : var.ami_id
+  instance_type = var.instance_type
+  key_name      = var.ssh_key_id
+
+  iam_instance_profile {
+    name = var.use_eip ? aws_iam_instance_profile.wireguard_profile[0].name : null
+  }
+
+  user_data = base64encode(templatefile("${path.module}/templates/user-data.txt", {
     wg_server_private_key = data.aws_ssm_parameter.wg_server_private_key.value
     wg_server_net         = var.wg_server_net
     wg_server_port        = var.wg_server_port
@@ -50,9 +54,13 @@ resource "aws_launch_configuration" "wireguard_launch_config" {
     use_eip               = var.use_eip ? "enabled" : "disabled"
     eip_id                = var.eip_id
     wg_server_interface   = var.wg_server_interface
-  })
-  security_groups             = local.security_groups_ids
-  associate_public_ip_address = var.use_eip
+  }))
+
+  network_interfaces {
+    associate_public_ip_address = var.use_eip
+    security_groups             = local.security_groups_ids
+    delete_on_termination       = true
+  }
 
   lifecycle {
     create_before_destroy = true
@@ -60,15 +68,19 @@ resource "aws_launch_configuration" "wireguard_launch_config" {
 }
 
 resource "aws_autoscaling_group" "wireguard_asg" {
-  name                 = aws_launch_configuration.wireguard_launch_config.name
-  launch_configuration = aws_launch_configuration.wireguard_launch_config.name
-  min_size             = var.asg_min_size
-  desired_capacity     = var.asg_desired_capacity
-  max_size             = var.asg_max_size
-  vpc_zone_identifier  = var.subnet_ids
-  health_check_type    = "EC2"
-  termination_policies = ["OldestLaunchConfiguration", "OldestInstance"]
-  target_group_arns    = var.target_group_arns
+  name                = aws_launch_template.wireguard_launch_template.name
+  vpc_zone_identifier = var.subnet_ids
+  min_size            = var.asg_min_size
+  desired_capacity    = var.asg_desired_capacity
+  max_size            = var.asg_max_size
+  health_check_type   = "EC2"
+  termination_policies = ["OldestLaunchTemplate", "OldestInstance"]
+  target_group_arns   = var.target_group_arns
+
+  launch_template {
+    id      = aws_launch_template.wireguard_launch_template.id
+    version = "$Latest"
+  }
 
   lifecycle {
     create_before_destroy = true
